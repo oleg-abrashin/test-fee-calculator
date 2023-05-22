@@ -1,92 +1,186 @@
 <?php
 
-require 'vendor/autoload.php';
-
 use Carbon\Carbon;
 
+require 'vendor/autoload.php';
 class CommissionCalculator
 {
-    public function calculateCommission(Operation $operation): float
+    const WITHDRAWAL_FREE_AMOUNT_EUR_LIMIT = 1000;
+    const WITHDRAWAL_FREE_QTY_LIMIT = 3;
+    const DEPOSIT_FEE_RATE = 0.0003; // 0.03% for deposits
+    const WITHDRAWAL_PRIVATE_FEE_RATE = 0.003; // 0.3% for private withdrawals
+    const WITHDRAWAL_BUSINESS_FEE_RATE = 0.005; //0.5% for business withdrawals
+    const OPERATION_TYPE_WITHDRAWAL = 'withdraw';
+    const OPERATION_TYPE_DEPOSIT = 'deposit';
+    const CUSTOMER_GROUP_PRIVATE = 'private';
+    const CUSTOMER_GROUP_BUSINESS = 'business';
+
+    /**
+     * @throws Exception
+     */
+    public function calculateCommission(Operation $operation, User $user): float
     {
-        $commissionRate = $this->getCommissionRate($operation);
+        $commissionRate = $this->getCommissionRate($operation,$user);
+
         $commission = $operation->getAmount() * $commissionRate;
-        $commission = $this->roundUpToCurrencyDecimalPlaces($commission, $operation->getCurrency());
-        return $commission;
+
+        $weekStartDate = $operation->getDate()->copy()->startOfWeek();
+
+        $weekEndDate = $operation->getDate()->copy()->endOfWeek();
+
+        $withdrawalsThisWeek = $user->getWithdrawalsThisWeek($weekStartDate, $weekEndDate);
+
+        //echo var_dump($withdrawalsThisWeek);
+        //echo var_dump($withdrawalsThisWeek == 1);
+        //echo var_dump($operation->getType() == self::OPERATION_TYPE_WITHDRAWAL);
+        //echo var_dump($operation->getUserType() === self::CUSTOMER_GROUP_PRIVATE);
+        //die();
+
+        //Calculate in the correct way fee for the first withdrawal who exceed the limit
+        if(
+            ($withdrawalsThisWeek == 1) &&
+            ($operation->getType() == self::OPERATION_TYPE_WITHDRAWAL) &&
+            ($operation->getUserType() === self::CUSTOMER_GROUP_PRIVATE)
+        )
+        {
+            echo 'yes';
+            $commission = ( $operation->getAmount() - self::WITHDRAWAL_FREE_AMOUNT_EUR_LIMIT ) * $commissionRate;
+        }
+
+        echo var_dump($commission);
+
+
+
+        return $this->roundUpToCurrencyDecimalPlaces($commission, $operation->getCurrency());
     }
 
-    private function getCommissionRate(Operation $operation): float
+    /**
+     * @throws Exception
+     */
+    private function getCommissionRate(Operation $operation, User $user): float
     {
         if ($operation->getType() === 'deposit') {
-            return 0.0003; // 0.03% for deposits
+            return self::DEPOSIT_FEE_RATE; // 0.03% for deposits
         }
 
         if ($operation->getUserType() === 'private') {
-            return $this->getPrivateWithdrawCommissionRate($operation);
+            return $this->getPrivateWithdrawCommissionRate($operation,$user);
         }
 
         if ($operation->getUserType() === 'business') {
-            return 0.005; // 0.5% for business withdrawals
+            return self::WITHDRAWAL_BUSINESS_FEE_RATE; // 0.5% for business withdrawals
         }
 
         throw new Exception('Invalid operation type or user type');
     }
 
-    private function getPrivateWithdrawCommissionRate(Operation $operation): float
+    /**
+     * @throws Exception
+     */
+    private function getPrivateWithdrawCommissionRate(Operation $operation, User $user): float
     {
-        $weekStartDate = $operation->getDate()->copy()->startOfWeek();
-        $weekEndDate = $operation->getDate()->copy()->endOfWeek();
-
-        $withdrawalsThisWeek = $operation->getUser()->getWithdrawalsThisWeek($weekStartDate, $weekEndDate);
-
-        if ($withdrawalsThisWeek < 3) {
-            if ($operation->getAmount() <= 1000) {
+        if ($this->isWithdrawalFree($operation, $user)) {
+            if ($operation->getAmount() <= self::WITHDRAWAL_FREE_QTY_LIMIT) {
                 return 0; // Free of charge
             }
-            return 0.003; // 0.3% for the first 3 withdrawals within the free limit
+            return self::WITHDRAWAL_PRIVATE_FEE_RATE; // 0.3% for the first 3 withdrawals within the free limit
         }
 
-        return 0.003; // 0.3% for the 4th and subsequent withdrawals within the free limit
+        return self::WITHDRAWAL_PRIVATE_FEE_RATE; // 0.3% for the 4th and subsequent withdrawals within the free limit
     }
 
+    private function isWithdrawalFree(Operation $operation, User $user): bool
+    {
+        $weekStartDate = $operation->getDate()->copy()->startOfWeek();
+
+        $weekEndDate = $operation->getDate()->copy()->endOfWeek();
+
+        $withdrawalsThisWeek = $user->getWithdrawalsThisWeek($weekStartDate, $weekEndDate);
+
+        //echo var_dump($withdrawalsThisWeek);
+        //die();
+
+        if ($withdrawalsThisWeek < 3) {
+
+            if ($operation->getAmount() <= self::WITHDRAWAL_FREE_AMOUNT_EUR_LIMIT) {
+                return true; // Free of charge
+            }
+
+            return false; // 0.3% for the first 3 withdrawals within the free limit
+        }
+
+        return false; // 0.3% for the 4th and subsequent withdrawals within the free limit
+    }
+
+    /**
+     * @throws Exception
+     */
     private function roundUpToCurrencyDecimalPlaces(float $amount, string $currency): float
     {
-        // Perform rounding based on currency decimal places
-        // Example: 0.023 EUR should be rounded up to 0.03 EUR
+        $decimalPlaces = $this->getCurrencyDecimalPlaces($currency);
+        $multiplier = 10 ** $decimalPlaces;
 
-        // Implement rounding logic here
-        // ...
+        return ceil($amount * $multiplier) / $multiplier;
+    }
 
-        return $amount; // Placeholder return value
+    /**
+     * @throws Exception
+     */
+    private function getCurrencyDecimalPlaces(string $currency): int
+    {
+        // Define the decimal places for each currency
+        $decimalPlaces = [
+            'EUR' => 2, // Euro - 2 decimal places
+            'USD' => 2, // US Dollar - 2 decimal places
+            'JPY' => 0, // Japanese Yen - 0 decimal places
+            // Add more currencies and their decimal places if needed
+        ];
+
+        if (isset($decimalPlaces[$currency])) {
+            return $decimalPlaces[$currency];
+        }
+
+        throw new Exception('Invalid currency');
     }
 }
 
 class CurrencyConverter
 {
-    public function getExchangeRate(string $fromCurrency, string $toCurrency): float
+    /**
+     * @throws Exception
+     */
+    public function getExchangeRate(string $baseCurrency, string $targetCurrency): float
     {
-        // Retrieve exchange rate from API or other sources
-        // Example: EUR:USD - 1:1.1497, EUR:JPY - 1:129.53
+        $url = 'https://developers.paysera.com/tasks/api/currency-exchange-rates';
+        $response = file_get_contents($url);
 
-        // Implement exchange rate retrieval logic here
-        // ...
+        if ($response === false) {
+            throw new Exception('Failed to fetch exchange rates.');
+        }
 
-        return 1; // Placeholder return value
+        $exchangeRates = json_decode($response, true);
+
+        if (!isset($exchangeRates[$baseCurrency]) || !isset($exchangeRates[$baseCurrency][$targetCurrency])) {
+            throw new Exception('Invalid exchange rate data.');
+        }
+
+        return $exchangeRates[$baseCurrency][$targetCurrency];
     }
 
-    public function convert(float $amount, float $exchangeRate): float
+    public function convert(mixed $amount, float $rate)
     {
-        return $amount * $exchangeRate;
     }
 }
 
+
 class Operation
 {
-    private $date;
-    private $userId;
-    private $userType;
-    private $type;
-    private $amount;
-    private $currency;
+    private Carbon $date;
+    private int $userId;
+    private string $userType;
+    private string $type;
+    private float $amount;
+    private string $currency;
 
     public function __construct(Carbon $date, int $userId, string $userType, string $type, float $amount, string $currency)
     {
@@ -131,18 +225,35 @@ class Operation
 
 class User
 {
-    private $id;
-    private $withdrawals;
+    private int $id;
+    private array $withdrawals;
+    private string $user_type;
 
-    public function __construct(int $id)
+    public function __construct(int $id, string $user_type)
     {
         $this->id = $id;
         $this->withdrawals = [];
+        $this->user_type = $user_type;
     }
 
     public function getId(): int
     {
         return $this->id;
+    }
+
+    public function setId($id): int
+    {
+        return $this->id = $id;
+    }
+
+    public function getUserType(): string
+    {
+        return $this->user_type;
+    }
+
+    public function setUserType($user_type): string
+    {
+        return $this->user_type = $user_type;
     }
 
     public function addWithdrawal(Operation $withdrawal): void
@@ -168,7 +279,7 @@ class User
 $csvFile = $argv[1];
 $csvData = file_get_contents($csvFile);
 $lines = explode("\n", $csvData);
-array_shift($lines); // Remove header line
+//array_shift($lines); // Remove header line
 
 $commissionCalculator = new CommissionCalculator();
 $currencyConverter = new CurrencyConverter();
@@ -181,19 +292,25 @@ foreach ($lines as $line) {
     $date = Carbon::createFromFormat('Y-m-d', $data[0]);
     $userId = $data[1];
     $userType = $data[2];
+    $userInstance = new User($userId,$userType);
     $operationType = $data[3];
     $amount = $data[4];
     $currency = $data[5];
 
+    //echo var_dump($amount);die();
+
     // Convert amount to EUR if needed
     if ($currency !== 'EUR') {
-        $rate = $currencyConverter->getExchangeRate($currency, 'EUR');
-        $amount = $currencyConverter->convert($amount, $rate);
+        try {
+            $rate = $currencyConverter->getExchangeRate($currency, 'EUR');
+        } catch (Exception $e) {
+        }
+        //$amount = $currencyConverter->convert($amount, $rate);
     }
 
     // Create User if not already created
     if (!isset($users[$userId])) {
-        $users[$userId] = new User($userId);
+        $users[$userId] = new User($userId,$userType);
     }
 
     // Create Operation object
@@ -204,9 +321,15 @@ foreach ($lines as $line) {
         $users[$userId]->addWithdrawal($operation);
     }
 
+    //echo var_dump($users[$userId]);die();
+
     // Calculate commission fee
-    $commission = $commissionCalculator->calculateCommission($operation);
+    try {
+        $commission = $commissionCalculator->calculateCommission($operation, $users[$userId]);
+    } catch (Exception $e) {
+        throw new Exception('Something went wrong when trying to calculate commission');
+    }
 
     // Output the commission fee
-    echo $commission . "\n";
+    echo $userId.' - '.$userType.' - '.$operationType.' - '.$amount.' - '.$currency.' => '.$commission . "\n";
 }
